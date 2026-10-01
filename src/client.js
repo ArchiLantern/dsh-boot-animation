@@ -154,7 +154,54 @@ function formatDuration(seconds) {
 }
 
 /**
- * The settings card.
+ * The Plugins page asks every `plugins.item` entry twice: `view: "summary"` for
+ * the row's one-liner and `view: "page"` for the configuration section.
+ *
+ * They are two COMPONENTS rather than two branches of one, because the summary
+ * answer uses no hooks at all and the page answer uses seven. One component that
+ * returned early for the summary view would call a different number of hooks
+ * depending on its props — a conditional hook call. React throws on that the
+ * moment one instance is rendered with the other view, and what a user sees then
+ * is a card that is present but dead: the page's own error boundary unmounts the
+ * subtree, and every control inside stops responding.
+ */
+
+/**
+ * The summary answer: one line, as a string.
+ *
+ * The page puts it inside a clamped `<span class="cardDesc">`
+ * (-webkit-line-clamp:1) on the list and inside a `<p>` on the detail page, so
+ * returning the card element here nested an `<li>` inside that span/p — invalid
+ * list markup, clipped to one line. The three shipped pages (web-search,
+ * agent-loop, shell) all answer this view with one line; this is the same
+ * sentence the card's own header carries.
+ * @returns the one-line description.
+ */
+function BootAnimationSummary() {
+  return '短片、进入方式与素材池'
+}
+
+/**
+ * The registered entry: pick the shape the page asked for.
+ *
+ * A component of its own, with no hooks, so that neither branch can change the
+ * hook count of the other. Registering `BootAnimationCard` directly would make
+ * that component call seven hooks for the page view and one for the summary view
+ * — a conditional hook call, which React rejects the moment one instance is
+ * rendered with the other view. What a user sees when that happens is a card
+ * that is present but dead: the page's own error boundary unmounts the subtree
+ * and every control inside it stops responding.
+ * @param props - the slot's inject face plus the page's owner props.
+ * @returns the card, or the one-line summary.
+ */
+function BootAnimationEntry(props) {
+  return props.view === 'summary'
+    ? BootAnimationSummary()
+    : BootAnimationCard(props)
+}
+
+/**
+ * The card.
  *
  * Collapsed by default, like every other card on this page: the Plugins section
  * is a list of plugins, and one that unfolds its controls on arrival pushes
@@ -167,20 +214,10 @@ function formatDuration(seconds) {
  * needs. The subscription is taken directly with `useSyncExternalStore` rather
  * than through the renderer's `use<Name>` binding, because a package outside this
  * repository cannot depend on that binding existing for it.
- * @param props - the slot's inject face, plus the page's `view` selector.
- * @returns the card element, or the one-line description for the summary view.
+ * @param props - the slot's inject face.
+ * @returns the card element.
  */
 function BootAnimationCard(props) {
-  // The Plugins page asks every `plugins.item` entry twice: `view: "summary"` for
-  // the row's one-liner and `view: "page"` for the configuration section. The
-  // summary answer must be a string, because the page puts it inside a clamped
-  // `<span class="cardDesc">` (-webkit-line-clamp:1) on the list and inside a `<p>`
-  // on the detail page. Returning the card element here nested a `<li>` inside that
-  // span/p, which is not valid list markup and clipped the card head to one line.
-  // The three shipped pages (web-search, agent-loop, shell) all answer the summary
-  // view with one line; this is the same sentence the card's own header carries.
-  if (props.view === 'summary') return '短片、进入方式与素材池'
-
   const React = props.runtime
   const scope = props.scope
   const [open, setOpen] = React.useState(false)
@@ -552,21 +589,73 @@ exports.apply = function apply(ctx) {
         // Host actually serves this namespace, so a profile with no settings
         // provider (or one whose schema package is missing) shows no tab at all
         // rather than an inert one.
+        //
+        // The registered component is a dispatcher, because the page asks for two
+        // different things through the same entry: `view: "summary"` for the row's
+        // one-liner and `view: "page"` for the configuration section. The view is an
+        // owner prop, not part of this face — `runInject` calls `inject` with only
+        // `(bindingKey, actions)`, so it cannot be read here — and the two render
+        // shapes use a different number of hooks, so they are two components and
+        // the dispatcher picks between them at render time.
+        //
+        // Registration is IDEMPOTENT, and that is load-bearing. `slots.register`
+        // throws when a list slot already holds an entry with the same id and
+        // priority:
+        //
+        //   list slot "plugins.item" already has an entry with id "boot-animation"
+        //
+        // and that throw lands inside the slot ledger's store notification. React's
+        // own subscription rides the same notification, so a duplicate registration
+        // does not merely log a line: it kills the card's updates while leaving the
+        // rendered DOM in place — a card that is visible and completely dead to both
+        // the mouse and the keyboard, with every control still enabled. Measured on
+        // the live desktop build: the header's click handler ran (a capture-phase
+        // listener saw the event) and the state never moved.
+        //
+        // `slots.inject(key, …)` only forbids a duplicate KEY, not a duplicate ENTRY,
+        // so it cannot provide this. Disposing the previous registration before
+        // registering again, plus owning the failure so it never reaches the store,
+        // is what makes a re-entry harmless.
+        let registration = null
         const contribute = function () {
-          slots.inject(SLOT, () => slots.register(
-            {
-              name: SLOT,
-              id: SETTINGS_NAMESPACE,
-              order: 60,
-              label: () => t('title'),
-              locale: LOCALE_NAMESPACE,
-              // Read lazily: the scope binds when the slot actually renders.
-              inject: () => ({ runtime: React, scope: forms.get(SETTINGS_NAMESPACE) }),
-            },
-            BootAnimationCard,
-          ))
+          if (registration !== null) return
+          try {
+            registration = slots.inject(SLOT, () => slots.register(
+              {
+                name: SLOT,
+                id: SETTINGS_NAMESPACE,
+                order: 60,
+                label: () => t('title'),
+                locale: LOCALE_NAMESPACE,
+                // Read lazily: the scope binds when the slot actually renders.
+                inject: () => ({ runtime: React, scope: forms.get(SETTINGS_NAMESPACE) }),
+              },
+              BootAnimationEntry,
+            ))
+          } catch (error) {
+            // A racing registration must not become an exception in the ledger's
+            // notification: drop our handle and log, so the card that IS mounted
+            // keeps its updates.
+            registration = null
+            console.warn('boot-animation: settings card not registered', error)
+          }
         }
-        const serve = function () { return forms.whileServed([SETTINGS_NAMESPACE], contribute) }
+        const withdraw = function () {
+          if (registration === null) return
+          const dispose = registration
+          registration = null
+          try {
+            if (typeof dispose === 'function') dispose()
+          } catch (error) {
+            console.warn('boot-animation: settings card not withdrawn', error)
+          }
+        }
+        const serve = function () {
+          return forms.whileServed([SETTINGS_NAMESPACE], function () {
+            contribute()
+            return withdraw
+          })
+        }
         if (typeof owner.effect === 'function') owner.effect(serve, 'boot-animation: settings page')
         else serve()
 
