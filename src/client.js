@@ -167,10 +167,20 @@ function formatDuration(seconds) {
  * needs. The subscription is taken directly with `useSyncExternalStore` rather
  * than through the renderer's `use<Name>` binding, because a package outside this
  * repository cannot depend on that binding existing for it.
- * @param props - the slot's inject face.
- * @returns the card element.
+ * @param props - the slot's inject face, plus the page's `view` selector.
+ * @returns the card element, or the one-line description for the summary view.
  */
 function BootAnimationCard(props) {
+  // The Plugins page asks every `plugins.item` entry twice: `view: "summary"` for
+  // the row's one-liner and `view: "page"` for the configuration section. The
+  // summary answer must be a string, because the page puts it inside a clamped
+  // `<span class="cardDesc">` (-webkit-line-clamp:1) on the list and inside a `<p>`
+  // on the detail page. Returning the card element here nested a `<li>` inside that
+  // span/p, which is not valid list markup and clipped the card head to one line.
+  // The three shipped pages (web-search, agent-loop, shell) all answer the summary
+  // view with one line; this is the same sentence the card's own header carries.
+  if (props.view === 'summary') return '短片、进入方式与素材池'
+
   const React = props.runtime
   const scope = props.scope
   const [open, setOpen] = React.useState(false)

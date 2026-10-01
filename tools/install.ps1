@@ -106,30 +106,73 @@ if (Test-Path $LinkPath) {
   Say "  linked $LinkPath -> $PackageDir"
 }
 
-# The settings card needs a schema, which comes from @deepseek-ai/schemastery. A
-# package copied by hand does not carry its dependencies, and without this the card
-# silently never appears - the animation works, the settings page just shows nothing
-# for this plugin. DSH itself ships that package, so link the host's copy when the
-# package does not have its own. Installs done through `dsh plugin add` get a real
-# dependency instead and skip all of this.
+# The settings card needs a schema, which comes from @deepseek-ai/schemastery, and
+# it needs a copy that actually has `Schema.prototype.volatile`: `dsh-settings`
+# serves a namespace only for an entry whose Config projects a form, and that
+# projection keeps volatile fields alone. An older copy without the method makes
+# entry.js degrade (it warns instead of throwing, so the animation still runs), and
+# the Settings card then never appears with nothing else to look at.
+#
+# The kernel's own copy (3.18.4+) lives inside the app payload, which Node cannot
+# resolve, so this script must find a real directory. A package that already
+# carries a good copy keeps it; otherwise the first GOOD candidate among the
+# profile's own links is used. A candidate that is present but too old is refused
+# by name, because linking it is exactly the silent failure this step exists to
+# prevent - that is how a workspace checkout's 3.18.1 build gets picked up.
 $SchemaName = '@deepseek-ai\schemastery'
 $SchemaLink = Join-Path $PackageDir "node_modules\$SchemaName"
+
+# Minimum copy that has Schema.prototype.volatile.
+$SchemaMinVersion = [version]'3.18.4'
+
+function Get-SchemaVersion([string]$dir) {
+  $manifest = Join-Path $dir 'package.json'
+  if (-not (Test-Path $manifest)) { return $null }
+  try {
+    $parsed = Get-Content $manifest -Raw | ConvertFrom-Json
+  } catch {
+    return $null
+  }
+  if ($parsed.name -ne '@deepseek-ai/schemastery' -or $null -eq $parsed.version) { return $null }
+  try { return [version]$parsed.version } catch { return $null }
+}
+
 if (Test-Path $SchemaLink) {
-  Say '  schema dependency already present'
+  $present = Get-SchemaVersion $SchemaLink
+  if ($null -ne $present -and $present -ge $SchemaMinVersion) {
+    Say "  schema dependency already present ($present)"
+  } elseif ($null -eq $present) {
+    Say "  WARNING: $SchemaLink exists but does not read as @deepseek-ai/schemastery."
+    Say '  The animation will work, but the Settings card may NOT appear.'
+    Say '  Point it at a copy of the schema package (3.18.4 or newer) and install again.'
+  } else {
+    Say "  WARNING: the linked schema dependency is $present, which has no .volatile()."
+    Say '  The animation will work, but the Settings card will NOT appear.'
+    Say "  Remove $SchemaLink and install again with a 3.18.4-or-newer copy in reach."
+  }
 } else {
   $candidates = @(
     (Join-Path $Profile "node_modules\$SchemaName"),
     (Join-Path (Join-Path $DshHome 'profiles') "node_modules\$SchemaName")
   )
   $source = ''
+  $rejected = @()
   foreach ($candidate in $candidates) {
-    if (Test-Path $candidate) { $source = $candidate; break }
+    if (-not (Test-Path $candidate)) { continue }
+    $found = Get-SchemaVersion $candidate
+    if ($null -ne $found -and $found -ge $SchemaMinVersion) { $source = $candidate; break }
+    $shown = if ($null -eq $found) { 'unreadable version' } else { "$found" }
+    $rejected += "$candidate ($shown)"
   }
   if ($source -eq '') {
-    Say '  WARNING: @deepseek-ai/schemastery was not found next to this profile.'
+    Say '  WARNING: no usable @deepseek-ai/schemastery was found (need 3.18.4 or newer).'
     Say '  The animation will work, but the Settings card will NOT appear.'
-    Say "  To fix it, run this in the package directory and install again:"
-    Say "    npm install --omit=dev"
+    if ($rejected.Count -gt 0) {
+      Say '  Refused, because an older copy silently hides the card:'
+      foreach ($row in $rejected) { Say "    $row" }
+    }
+    Say '  To fix it, put the copy the kernel loads (3.18.4+) at:'
+    Say "    $SchemaLink"
     Say "  (looked in: $($candidates -join ' ; '))"
   } else {
     New-Item -ItemType Directory -Force -Path (Join-Path $PackageDir 'node_modules\@deepseek-ai') | Out-Null

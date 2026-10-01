@@ -37,11 +37,25 @@ DSH 启动加载动画：短片**片尾交叉溶解进界面**、多片随机、
 
 改完**刷新页面生效**，不用重启 DSH（改了 `entry.js` 的那次除外），也不用重新构建。
 
+> **下面这段记的是 0.2.0-rc.2 之前的接法，已经失效**——保留它是因为症状仍然会以同样的面目出现。当前事实见紧随其后的「适配 DSH 0.2.0-rc.2」。
+
 它是怎么接进去的：DSH 的设置页把「插件配置」页渲染成**两份账本的交集**——Host 提供（`settings.register`）的设置命名空间，和浏览器注册进 `settings.plugin.item` 槽位的卡片。两张卡片的配对键就是命名空间字符串（`boot-animation`），所以两半各在一边、互不相识。这也是 DSH 给**本仓库之外的插件**预留的路径，`ui-settings-plugins` 的槽位注释写得很明白。
 
 > **卡片这一半我没法在这里验证。** 客户端 React 组件在真机 GUI 里长什么样、点下去有没有反应，只有你刷新看一眼才知道——沙箱里起不了浏览器。我能做到的是：把 `lib/client.js` 加载进桩 React + 桩 DOM **真渲染一遍**，断言三个小节渲染出来了、当前值被标为选中、点「4 秒」真的把 `fadeMs: 4000` 写进设置。这能拦住"接线错了/渲染抛了"，拦不住"样式在真主题下难看"。
 
-### 装依赖的一个坑（已踩）
+### 适配 DSH 0.2.0-rc.2（当前事实）
+
+DSH 0.2.0-rc.2 **删掉了 Host 侧 `settings.register(ns, schema)`**：现在命名空间不是"注册"出来的，而是**由插件条目本身派生**的。规则有三条，缺一条卡片就不出现：
+
+1. **声明，而不是注册。** 插件模块的导出对象上要有一个 `Config`（schemastery schema）。`RegistryService.plugin()` 把它记成 `runtime.Config`，`@deepseek-ai/dsh-settings` 的 `describe()` 只挑**正在运行、且解析得到 `Config`** 的条目。
+2. **命名空间 = profile 补丁里的条目 id。** 这里是 `cordis.patch.yml` 里的 `- insert: id: boot-animation`。浏览器半侧在 `src/client.js` 的 `SETTINGS_NAMESPACE` 里写同一个字符串，通过客户端的 `configForms` 服务（`whileServed` + `get`）接上——**没有第二本账**，也不再有 `settings.plugin.item` 这个槽位（现在是 `plugins.item`）。
+3. **字段必须标 `.volatile()`。** `describe()` 内部先做一次 `volatileForm(schema)` 投影，**只保留 volatile 字段**；一个 volatile 字段都没有时它返回 `undefined`，条目被整个跳过——`describe()` 连这条都不返回，`whileServed` 自然永不触发。写入侧同样：`write()`（`update`/`replace`/`mutate` 全走它）对非 volatile 路径直接抛 `Config field "..." is not volatile`。所以四个字段全部标了。
+
+`.volatile()` 还有一个必须知道的后座力：**它在 `apply(ctx, config)` 里给的不是值，是一个稳定引用**（`{ get() }`，用 `Symbol.for('cosmokit.volatile.write')` 跨 ESM/CJS 副本识别）。要 `.get()` 才是当前快照——`dsh-bash-local` 也是这么读的（`config.timeoutMs.get()`）。这也是"改完刷新就生效"的机制：只有 volatile 值变化时，`@deepseek-ai/cordis-plugin-loader` 会把新快照**原地提交进同一个引用**并发出 `loader/volatile-update`，**不重启 fiber**，所以下一次 index 渲染读到的就是新值。`entry.js` 里对应的是 `readField()`。
+
+还有一处**没有变、但更致命**的依赖：`Config` 必须是模块命名空间对象上的属性，所以 `import z from '@deepseek-ai/schemastery'` 变成了**静态导入**（老的惰性 `import` 永远声明不出 `Config`）。代价是失败模式变了——**schema 包解析不到，整个模块都求值不了**，路由和开机画面一起没了。因此 `package.json` 里它是 **`peerDependencies: { "@deepseek-ai/schemastery": "*" }`**（由宿主提供，不再声明 `dependencies`），而盘上那份链接必须指向**内核用的副本（3.18.4 或更新）**——工作区检出旁边那份 3.18.1 的 `lib/index.mjs` 与 `lib/index.cjs` 里 `volatile` 出现 **0 次**，直接调用会让模块求值即抛。`entry.js` 的 `LIVE_CAPABLE` 先探测该方法：有就标 volatile，没有就退化成普通 schema，并在 `apply` 里留一条说明该改哪个链接的告警——最坏情况是"卡片不出现 + 一条可诊断的告警"，而不是插件全灭。
+
+### 装依赖的一个坑（已踩，惰性导入时代的历史）
 
 设置命名空间需要一个 schema，用的是 DSH 自己的 `@deepseek-ai/schemastery`。它在 `entry.js` 里是**惰性 `import`**，而 **ESM 解析不认 `NODE_PATH`，只从"导入文件所在目录"逐级往上找 `node_modules`**——而且会先把符号链接解析成真实路径。
 
@@ -51,6 +65,8 @@ DSH 启动加载动画：短片**片尾交叉溶解进界面**、多片随机、
 2. 当前这个 junction 安装，在包内建了 `node_modules/@deepseek-ai/schemastery` → profile 那副本的链接，所以**现在就生效**。
 
 `tools/verify-settings.mjs` 专门验这件事：它**从 profile 的链接位置导入 `entry.js`**（和真实加载一致），然后断言 schema 真的注册上了、默认值/上下界/枚举都对。如果你哪天重装依赖把这个链接弄没了，这个套件会从"18/18"变成报告 `schema path: not exercised`。
+
+> **这两条现在都过时了，但结论反过来更要紧。** `entry.js` 改成了**静态**导入（`Config` 必须是模块导出对象的属性，惰性导入永远声明不出来），`package.json` 里它也从 `dependencies` 移到了 `peerDependencies: { "@deepseek-ai/schemastery": "*" }`。盘上那个可解析的副本仍然必须存在——但**必须是内核用的那份 3.18.4+**；指到工作区检出旁边的 3.18.1，`LIVE_CAPABLE` 探测失败，卡片不出现并留一条告警（详见上一节）。
 
 ### 卡片没出现的第二个坑：`ctx.get` 抢跑
 
@@ -329,7 +345,7 @@ node tools/verify-all.mjs # 跑全部离线校验
 | `verify-exit-simple.mjs` | 退出只有一次 2 秒淡出；删掉的过渡不留悬空引用；**放行逻辑里没有时长/定时器/毫秒阈值** |
 | `verify-enter-sequence.mjs` | **把 `src/boot-screen.js` 加载进桩 DOM、推假时钟真跑时序**：只就绪不放行、片尾先到要等就绪、时长未知有兜底、播完不被重放、**三种进入方式各有用例**。这是唯一能证明"内核就绪但片子还在放时**不会**进"的套件——正则做不到 |
 | `verify-client-bundle.mjs` | 客户端产物的完整契约：工厂签名、`require` 的模块都在 shell 基线表里、**拿不到 react 也不影响交接信号**，并把卡片**加载进桩 React 真渲染一遍**，断言三个小节渲染出来、当前值被标记、点击真的写入设置 |
-| `verify-settings.mjs` | 设置面：**两半的命名空间必须一致**（配对全靠这个字符串，别处没人查）、schema 真的注册上、默认值/上下界/枚举、注入的配置跟着存储值变、清单带 `enabled`/`bytes`/`faststart` |
+| `verify-settings.mjs` | 设置面：**两半的命名空间必须一致**（配对全靠这个字符串，别处没人查）、schema 真的注册上、默认值/上下界/枚举、注入的配置跟着存储值变、清单带 `enabled`/`bytes`/`faststart`。0.2.0-rc.2 之后"注册"这一步没了，对应的是"`Config` 真的被导出、字段真的标了 volatile、注入跟着 volatile 引用的当前快照变" |
 | `verify-real-clips.mjs` | 对**三段真实素材**逐条打真 Range 请求、逐字节比对；并断言清单不把 `.faststart` 副本收进随机池 |
 
 后两项是关键补强。前几项用的是手写桩，桩只能证明插件自洽；`verify-real-context.mjs` 证明它跟真实 Cordis 对接正确；`verify-install-rehearsal.mjs` 用 dsh 真正的 profile 加载器预演"装完之后"，证明 **bundle 解析与 patch 解析能离线通过**。

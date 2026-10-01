@@ -11,11 +11,35 @@
 // component: the kernel constructs its own boot page synchronously in
 // `AppWebEntry`'s constructor, which runs from the shell module script, so only a
 // parser-blocking index row executes early enough to pre-empt it.
+//
+// Settings are the third contribution, and under DSH 0.2.0-rc.2 they are
+// DECLARED rather than registered. The Host `settings` service has no
+// `register(ns, schema)` method any more: a settings namespace IS a plugin entry.
+// `@deepseek-ai/dsh-settings` describes every running entry whose resolved export
+// carries a `Config` schema — `entry.fiber.runtime.Config`, filled from this
+// module's `Config` export by `RegistryService.plugin` — keyed by the entry id in
+// the profile patch, here `boot-animation`. The browser half pairs with that same
+// string, through the client `configForms` service, which exposes only the
+// namespaces the Host actually serves. Two consequences are load-bearing:
+//
+//   * `Config` must be a property of the module namespace object, so the schema
+//     package has to resolve at module-evaluation time. The previous lazy import
+//     degraded to "no settings card"; a static import fails the whole module,
+//     which is why `@deepseek-ai/schemastery` is a peer dependency — the host
+//     supplies it — and never a vendored copy.
+//   * `describe()` reports only an entry whose Config projects a non-empty form,
+//     and that projection keeps only fields marked `.volatile()`. A schema with
+//     no live field is invisible to the settings page; see `LIVE_CAPABLE`.
+//
+// The patch id is therefore part of the contract: renaming the `- insert:` id in
+// cordis.patch.yml moves the namespace and silently orphans the browser card,
+// whose key is the same string.
 
 import { readdir, stat, open } from 'node:fs/promises'
 import { createReadStream, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { basename, extname, join, resolve, sep } from 'node:path'
+import z from '@deepseek-ai/schemastery'
 
 /**
  * Absolute path of the pre-boot screen source.
@@ -34,19 +58,14 @@ const VIDEO_EXTENSIONS = new Set(['.mp4', '.webm', '.m4v', '.mov'])
 const ROUTE = '/plugins/dsh-boot-animation'
 
 /**
- * Settings namespace this plugin owns.
+ * The values the screen runs with when the applied config does not carry one.
  *
- * Lowercase-hyphenated because that is the parser's contract, and it is also the
- * key the browser card registers under: the Plugins settings page renders the
- * intersection of the namespaces the Host serves and the cards registered into
- * `settings.plugin.item`, so this one string is what pairs the two halves.
- */
-const SETTINGS_NS = 'boot-animation'
-
-/**
- * What the screen does when nothing has been configured, and the value every
- * field falls back to individually — the schema defaults mirror these, so an
- * absent settings document and an empty one behave identically.
+ * With a `Config` schema present these are unreachable in practice: Cordis
+ * validates the raw profile row against the schema before `apply` runs, so every
+ * field arrives already defaulted and an absent settings document and an empty
+ * one resolve identically. They are kept anyway, because the fallback must not
+ * depend on the schema having been resolvable — a profile that cannot load the
+ * schema package still boots, and this plugin then still serves its clips.
  */
 const DEFAULT_SETTINGS = {
   /**
@@ -62,8 +81,91 @@ const DEFAULT_SETTINGS = {
   disabledClips: [],
 }
 
-/** The schema defaults, in the order the browser card presents them. */
+/** The accepted `enterMode` values, in the order the browser card presents them. */
 const ENTER_MODES = ['tail', 'end', 'click']
+
+/**
+ * Whether the resolved schemastery can mark a Config field live-editable.
+ *
+ * `.volatile()` is what makes `dsh-settings` project a field into the form the
+ * settings page renders: `volatileForm()` keeps only fields with `meta.volatile`,
+ * and `describe()` drops every entry whose projected form is empty. The kernel's
+ * copy (3.18.4, inside the app payload) has the method. An older copy linked next
+ * to this package — the 3.18.1 build that sits beside a workspace checkout — does
+ * not, and calling it there would throw while this module is being evaluated,
+ * taking the routes and the boot screen down with the settings card.
+ *
+ * So the method is probed once and the schema degrades to non-volatile when it is
+ * absent. The cost is a hidden settings card; `apply` warns with the fix.
+ */
+const LIVE_CAPABLE = typeof z.boolean().volatile === 'function'
+
+/** Mark one Config field live-editable, where the schema library allows it. */
+function live(schema) {
+  return LIVE_CAPABLE ? schema.volatile() : schema
+}
+
+/**
+ * The well-known key cosmokit puts on a live config reference.
+ *
+ * `.volatile()` does not yield the value: it yields a stable reference whose
+ * `get()` answers the current immutable snapshot, identified across ESM/CJS
+ * copies of the library by this global-registry symbol rather than by identity.
+ * A plugin therefore reads a volatile field through `get()`, exactly as the
+ * shipped Host plugins do (`dsh-bash-local`: `config.timeoutMs.get()`).
+ *
+ * The reference is also what lets a stored edit take effect without a restart:
+ * when only volatile values differ, `@deepseek-ai/cordis-plugin-loader` commits
+ * the new snapshot into the SAME reference (`updateVolatile`) and emits
+ * `loader/volatile-update` instead of restarting the fiber. `apply` is not run
+ * again, so a value read per index render is always the stored one.
+ */
+const VOLATILE_REF = Symbol.for('cosmokit.volatile.write')
+
+/** Whether a config value is a live reference rather than a plain snapshot. */
+function isLive(value) {
+  return typeof value === 'object' && value !== null && VOLATILE_REF in value
+}
+
+/**
+ * Read one applied-config field.
+ *
+ * The field is a live reference when `Config` declared it volatile — the normal
+ * case — and a plain value when the config arrived without schema resolution,
+ * which is the same pair of shapes `dsh-settings`' own `plainConfig()` handles.
+ * An absent field stays absent, leaving the per-field defaulting to its caller.
+ * @param config - the applied config, possibly undefined.
+ * @param key - field name.
+ * @returns the current value, or undefined when the field is absent.
+ */
+function readField(config, key) {
+  const value = config?.[key]
+  return isLive(value) && typeof value.get === 'function' ? value.get() : value
+}
+
+/**
+ * This entry's Host configuration schema.
+ *
+ * The namespace is not named here because it is no longer named anywhere on this
+ * side: it is the entry id the profile patch mounts this row under,
+ * `- insert: id: boot-animation`. `src/client.js` spells that same string in
+ * `SETTINGS_NAMESPACE`, and nothing else checks that the two agree.
+ *
+ * The four field names, defaults and bounds are the ones the removed
+ * `settings.register(SETTINGS_NS, schema)` call declared, so an absent settings
+ * document and an empty one still behave identically.
+ *
+ * All four are volatile, because that is the only class the settings service
+ * serves: it projects volatile fields and nothing else. The price is that the
+ * applied config carries live references rather than plain values — see
+ * `readField`.
+ */
+export const Config = z.object({
+  enabled: live(z.boolean().default(DEFAULT_SETTINGS.enabled)),
+  fadeMs: live(z.number().min(300).max(5000).default(DEFAULT_SETTINGS.fadeMs)),
+  enterMode: live(z.union([...ENTER_MODES]).default(DEFAULT_SETTINGS.enterMode)),
+  disabledClips: live(z.array(z.string()).default([])),
+})
 
 /** Package name the loader mounts this row as. */
 export const name = 'dsh-boot-animation'
@@ -278,64 +380,53 @@ function resolveClip(url) {
 /**
  * Mount the clip route and the pre-boot index injection.
  * @param ctx - Host plugin context.
+ * @param config - the applied config, already validated against `Config`. Each
+ *   field arrives as a live reference carrying its defaulted value, so a profile
+ *   with no settings document reads the same values as one holding an empty
+ *   document.
  */
-export function apply(ctx) {
+export function apply(ctx, config) {
   const server = ctx.webServer
 
-  // The registered settings owner scope, once the optional settings service has
-  // taken the namespace. Null means "no settings provider in this profile", and
-  // every read then answers the defaults.
-  let settingsOwner = null
+  if (!LIVE_CAPABLE) {
+    ctx.logger?.warn?.(
+      'boot-animation: the resolved @deepseek-ai/schemastery has no .volatile(), so DSH '
+      + 'will not serve this entry as a settings namespace and the settings card stays '
+      + 'hidden. Link node_modules/@deepseek-ai/schemastery to the copy the kernel loads '
+      + '(>= 3.18.4).',
+    )
+  }
 
   /**
    * The settings the screen should run with right now.
    *
-   * Read per index render rather than cached: the owner resolves a stored edit
-   * immediately, and the boot screen is rebuilt from this on the next page load,
-   * which is exactly when a new value can take effect.
+   * Read per index render rather than cached, because the boot screen is rebuilt
+   * from this on the next page load — which is exactly when a new value can take
+   * effect, and the loader has by then already committed a stored edit into the
+   * references this reads.
+   *
+   * Every field falls back individually. With `Config` resolved the fallback is
+   * unreachable, but it must stay so that a profile which could not load the
+   * schema, and therefore receives an unresolved config, still boots a working
+   * animation under the documented defaults.
    * @returns the resolved settings, with every field defaulted.
    */
   function currentSettings() {
-    if (settingsOwner === null) return DEFAULT_SETTINGS
     try {
-      const stored = settingsOwner.get()
+      const enabled = readField(config, 'enabled')
+      const fadeMs = readField(config, 'fadeMs')
+      const enterMode = readField(config, 'enterMode')
+      const disabledClips = readField(config, 'disabledClips')
       return {
-        enabled: typeof stored?.enabled === 'boolean' ? stored.enabled : DEFAULT_SETTINGS.enabled,
-        fadeMs: typeof stored?.fadeMs === 'number' ? stored.fadeMs : DEFAULT_SETTINGS.fadeMs,
-        enterMode: ENTER_MODES.includes(stored?.enterMode) ? stored.enterMode : DEFAULT_SETTINGS.enterMode,
-        disabledClips: Array.isArray(stored?.disabledClips) ? stored.disabledClips : [],
+        enabled: typeof enabled === 'boolean' ? enabled : DEFAULT_SETTINGS.enabled,
+        fadeMs: typeof fadeMs === 'number' ? fadeMs : DEFAULT_SETTINGS.fadeMs,
+        enterMode: ENTER_MODES.includes(enterMode) ? enterMode : DEFAULT_SETTINGS.enterMode,
+        disabledClips: Array.isArray(disabledClips) ? disabledClips : [],
       }
     } catch (error) {
       ctx.logger?.warn?.('boot-animation: settings unreadable, using defaults', error)
       return DEFAULT_SETTINGS
     }
-  }
-
-  // Optional service, so it is reached through `ctx.inject` rather than declared
-  // in `inject`: a profile without a settings provider must still boot, and the
-  // namespace then stays unserved — which is also what keeps the browser card
-  // away, since the Plugins page renders only namespaces the Host actually
-  // serves.
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['settings'], (settingsCtx) => {
-      // Imported lazily, and the whole registration is allowed to fail: the
-      // plugin's own module imports nothing but node: builtins, so a missing
-      // schema package costs the settings surface and nothing else.
-      void import('@deepseek-ai/schemastery').then((module) => {
-        const z = module.default ?? module
-        const schema = z.object({
-          enabled: z.boolean().default(DEFAULT_SETTINGS.enabled),
-          fadeMs: z.number().min(300).max(5000).default(DEFAULT_SETTINGS.fadeMs),
-          enterMode: z.union([...ENTER_MODES]).default(DEFAULT_SETTINGS.enterMode),
-          disabledClips: z.array(z.string()).default([]),
-        })
-        settingsOwner = settingsCtx.settings.register(SETTINGS_NS, schema)
-      }).catch((error) => {
-        settingsCtx.logger?.warn?.(
-          'boot-animation: settings namespace not registered (schema package unavailable)', error,
-        )
-      })
-    })
   }
 
   // Two routes rather than one prefix over ROUTE. The web server resolves
