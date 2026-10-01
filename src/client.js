@@ -244,7 +244,21 @@ function cardForm(props) {
     return null
   })()
 
-  return { source, fallback, mutate }
+  // The RPC itself, reached directly when the form does not expose it. The kernel's
+  // `mutate` answers `false` for every rejected write and swallows the reason, so
+  // the only way to tell a stale-revision conflict from a refused operation is to
+  // issue the same call and read the remote failure. `undefined` when this bundle
+  // cannot see the service, in which case the card reports what it can.
+  const remoteMutate = (() => {
+    const remote = props.remote
+    const settings = remote !== undefined && remote !== null ? remote.settings : undefined
+    if (settings !== undefined && settings !== null && typeof settings.mutate === 'function') {
+      return (namespace, ops, revision) => settings.mutate(namespace, ops, revision)
+    }
+    return null
+  })()
+
+  return { source, fallback, mutate, remoteMutate }
 }
 
 /**
@@ -390,11 +404,14 @@ function BootAnimationCard(props) {
    * atomic `set` at a top-level path — so the same call works whether the page
    * handed us its configuration form or we fell back to the injected scope.
    *
-   * The revision travels with the write because the Host refuses a mutation that
-   * was composed against a document it has since replaced; the reader's current
-   * revision is the only correct fence. `mutate` answers whether the Host
-   * ACCEPTED the change, so a refusal is surfaced instead of leaving a control
-   * that silently does nothing — which is the failure this card was reported for.
+   * The revision travels with the write because the Host refuses a mutation
+   * composed against a document it has since replaced, and `mutate` reports that
+   * refusal as a bare `false` — it swallows the reason. So a refusal is retried
+   * once through the remote service with the SAME operation and no revision fence:
+   * if the operation itself is acceptable the retry lands, and if it is not, the
+   * remote failure text is shown. Either way the user sees why, instead of a
+   * control that quietly does nothing — which is the failure this card was
+   * reported for.
    * @param field - config field name.
    * @param value - the value to store.
    */
@@ -406,9 +423,28 @@ function BootAnimationCard(props) {
     setBusy(true)
     setFailure(null)
     const revision = snapshot === undefined || snapshot === null ? undefined : snapshot.revision
-    Promise.resolve(form.mutate([{ op: 'set', path: [field], value }], revision))
-      .then((accepted) => {
-        if (accepted === false) setFailure('保存失败：本部署没有接受这次修改。')
+    const ops = [{ op: 'set', path: [field], value }]
+    Promise.resolve(form.mutate(ops, revision))
+      .then(async (accepted) => {
+        if (accepted !== false) return
+        if (form.remoteMutate === null) {
+          setFailure('保存失败：本部署没有接受这次修改。')
+          return
+        }
+        // Retry through the service, unfenced, to learn WHY it was refused.
+        try {
+          const answer = await form.remoteMutate(SETTINGS_NAMESPACE, ops, undefined)
+          if (answer !== null && typeof answer === 'object' && answer.ok === false) {
+            const reason = answer.error === undefined || answer.error === null
+              ? '未说明原因'
+              : String(answer.error.message ?? answer.error)
+            setFailure('保存失败：' + reason)
+          } else {
+            setFailure('保存失败：本部署没有接受这次修改。')
+          }
+        } catch (error) {
+          setFailure('保存失败：' + String(error))
+        }
       })
       .catch((error) => setFailure('保存失败：' + String(error)))
       .then(() => setBusy(false))
