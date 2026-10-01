@@ -338,37 +338,54 @@ export function apply(ctx) {
     })
   }
 
+  // Two routes rather than one prefix over ROUTE. The web server resolves
+  // prefixes longest-first, so a prefix on ROUTE also claims
+  // `<ROUTE>/client.js` — the URL the browser fetches for this package's own
+  // client bundle (client-modules serves every bundle at
+  // `/plugins/<package>/client.js`). That request would answer this plugin's
+  // 404, the bundle would never materialize, and the Settings card would never
+  // register. An exact manifest route plus a `/clip` prefix leaves every other
+  // path under ROUTE to its owner.
   ctx.effect(() => server.register({
-    kind: 'prefix',
-    path: ROUTE,
+    kind: 'exact',
+    path: `${ROUTE}/clips.json`,
     handler: (req, res) => {
       void (async () => {
-        const url = req.url ?? ''
-        if (url.split('?')[0] === `${ROUTE}/clips.json`) {
-          const clips = await listClips()
-          const disabled = new Set(currentSettings().disabledClips)
-          sendJson(res, 200, {
-            clips: clips.map(clip => ({
-              // The revision is the size+time pair the bytes route also answers as
-              // its ETag, and the URL is what makes a stale cache entry unreachable:
-              // it changes whenever the file does — or whenever the scheme that
-              // produced a bad entry changes. The first scheme (mtime alone) left
-              // truncated `immutable` entries that a normal reload kept reusing, and
-              // nothing but a hard reload could dislodge them.
-              src: `${ROUTE}/clip/${encodeURIComponent(basename(clip.file))}`
-                + `?v=${String(clip.revision)}-${String(clip.bytes)}`,
-              name: basename(clip.file),
-              // Everything on disk is listed, with the pool decision carried as a
-              // field. The screen plays only the enabled ones; the settings card
-              // needs the whole list to offer them back.
-              enabled: !disabled.has(basename(clip.file)),
-              bytes: clip.bytes,
-              faststart: clip.faststart,
-            })),
-          })
-          return
-        }
-        const absolute = resolveClip(url)
+        const clips = await listClips()
+        const disabled = new Set(currentSettings().disabledClips)
+        sendJson(res, 200, {
+          clips: clips.map(clip => ({
+            // The revision is the size+time pair the bytes route also answers as
+            // its ETag, and the URL is what makes a stale cache entry unreachable:
+            // it changes whenever the file does — or whenever the scheme that
+            // produced a bad entry changes. The first scheme (mtime alone) left
+            // truncated `immutable` entries that a normal reload kept reusing, and
+            // nothing but a hard reload could dislodge them.
+            src: `${ROUTE}/clip/${encodeURIComponent(basename(clip.file))}`
+              + `?v=${String(clip.revision)}-${String(clip.bytes)}`,
+            name: basename(clip.file),
+            // Everything on disk is listed, with the pool decision carried as a
+            // field. The screen plays only the enabled ones; the settings card
+            // needs the whole list to offer them back.
+            enabled: !disabled.has(basename(clip.file)),
+            bytes: clip.bytes,
+            faststart: clip.faststart,
+          })),
+        })
+      })().catch((error) => {
+        ctx.logger?.error?.('boot-animation: manifest route failed', error)
+        if (!res.headersSent) sendJson(res, 500, { error: 'internal' })
+        else res.end()
+      })
+    },
+  }), 'boot-animation: manifest route')
+
+  ctx.effect(() => server.register({
+    kind: 'prefix',
+    path: `${ROUTE}/clip`,
+    handler: (req, res) => {
+      void (async () => {
+        const absolute = resolveClip(req.url ?? '')
         if (absolute === undefined) {
           sendJson(res, 404, { error: 'not found' })
           return
