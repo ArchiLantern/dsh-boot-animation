@@ -86,10 +86,10 @@ Every line here cost a real debugging session. They are not style preferences.
 Installed state: the package is linked into a DSH profile
 (`<profile>/node_modules/dsh-boot-animation` → this directory) with a one-row
 `- insert:` block in the profile's `cordis.patch.yml`. `package.json` is not
-modified and no `pnpm install` runs. `tools/install.ps1` does it, and
-`tools/uninstall.ps1` reverses it. The profile to name is the one DSH actually
-runs (`desktop` for the desktop app, `web` for `dsh web`), not the script's
-default.
+modified and no `pnpm install` runs. `tools/install.ps1` (Windows) and
+`tools/install.sh` (macOS / Linux) do it, and each one's `uninstall.*` reverses
+it. The profile to name is the one DSH actually runs (`desktop` for the desktop
+app, `web` for `dsh web`), not the script's default.
 
 One thing the link does **not** provide: `@deepseek-ai/schemastery`. The Host half
 imports it statically, so it must resolve from this directory — normally that is
@@ -119,6 +119,7 @@ preview tooling:
 | `tools/codec-report.mjs` | The video codec fourcc per clip |
 | `tools/preview.mjs` | Local two-server preview of the injection, without restarting DSH |
 | `tools/install.ps1` / `tools/uninstall.ps1` | Add or remove the profile link and the patch row. Both name the profile the running DSH uses (`desktop`, not the `web` default) and both must leave `cordis.patch.yml` byte-identical except for the row they own — UTF-8, no BOM, CJK intact. `install.ps1`'s last step only *reports* whether a dsh server answered; it does not repair, and it does not roll back on a port it could not reach. |
+| `tools/install.sh` / `tools/uninstall.sh` | The macOS / Linux twins of the pair above: same two changes, same backup, same UTF-8-safe line handling, plus a schema-version probe (≥ 3.18.4 with `.volatile()`). |b1349df (Add macOS/Linux install support (tools/install.sh + tools/uninstall.sh))
 
 For a Host-half change the offline proof that matters is that the module still
 evaluates, still exports the schema the settings service looks for, and still

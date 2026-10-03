@@ -12,7 +12,7 @@
 | **Node.js** | `^22.19.0` 或 `>=24`（DSH 自己就要求这个，通常已经有） |
 | 浏览器 | Chromium 内核（Chrome / Edge）。Firefox 没测过 |
 
-## 安装：两条路，选一条
+## 安装：三条路，选一条
 
 ### 路 A：官方命令（推荐）
 
@@ -21,6 +21,10 @@ dsh plugin --profile web add <解压出来的目录>
 ```
 
 这条路会让 pnpm 把依赖也装好，**装完重启一次 DSH**。
+
+> 桌面版（DSH Desktop）的 profile 名叫 `desktop`，而这个命令不允许直接改它
+> （会报 `profile "desktop" is managed exclusively by the Electron application`）。
+> 桌面版请走路 B 或路 C。
 
 ### 路 B：不重启（Windows）
 
@@ -37,6 +41,24 @@ powershell -ExecutionPolicy Bypass -File tools\install.ps1
 - 大多数 profile 会热加载（几秒内生效）；不热加载的，脚本会提醒你手动重启
 - **撤销**：`powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -ProfileName desktop`
   （桌面版 profile 叫 `desktop`，脚本默认找的是 `web`；详见下面的「卸掉」）
+
+### 路 C：macOS / Linux
+
+```sh
+sh tools/install.sh --profile desktop   # 桌面版（DSH Desktop 用的那个 profile）
+sh tools/install.sh                     # dsh web 用的那个（默认就是 web）
+```
+
+和路 B 是同一件事：找 DSH 的位置（先看 `DSH_HOME`，再找 `~/.dsh`）、在 profile 里建目录链接、
+追加一行配置，并把设置卡片需要的 `@deepseek-ai/schemastery` 链上（DSH 自带那份，要 3.18.4 及以上）。
+**不跑 pnpm、不改 `package.json`。** 装完重启一次。
+
+- 找不到 profile 会**明确报错并列出有哪些 profile**，不会乱写
+- 装之前**自动备份** `cordis.patch.yml`
+- 已经作为 bundle 层挂着的机器上它会直接收工，不会挂出第二条同 id 的 entry
+- 大多数 profile 会热加载（几秒内生效）；不热加载的，脚本会提醒你手动重启
+- **撤销**：`sh tools/uninstall.sh`（`--profile` 同上）；它只摘掉自己追加的那行、删掉链接，
+  并断言 `cordis.patch.yml` 回到安装前的字节
 
 ## 装完检查
 
@@ -70,7 +92,8 @@ powershell -ExecutionPolicy Bypass -File tools\install.ps1
 | 想要 | 怎么做 |
 |---|---|
 | 暂时不要动画 | 设置卡片里关掉「开启启动动画」 |
-| 摘掉插件（留文件） | `powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -ProfileName desktop`，然后刷新 |
+| 摘掉插件（Windows） | `powershell -ExecutionPolicy Bypass -File tools\uninstall.ps1 -ProfileName desktop`（桌面版 profile 叫 `desktop`，默认找 `web`），然后刷新 |
+| 摘掉插件（macOS / Linux） | `sh tools/uninstall.sh --profile desktop`，然后刷新 |b1349df (Add macOS/Linux install support (tools/install.sh + tools/uninstall.sh))
 | 彻底删掉 | 先跑上面的 uninstall，再删掉整个目录 |
 
 profile 是热加载的，摘掉后刷新页面就回到 DSH 原生启动页，不必重启。
