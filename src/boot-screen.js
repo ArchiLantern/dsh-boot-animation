@@ -43,6 +43,24 @@
   var ARC_SPAN = 216
   var cache = { startedAt: Date.now(), current: null, loaded: false }
 
+  // The Windows caption (minimise / maximise / close) is painted by Electron
+  // *above* the page, so no z-index here can ever cover it — which is why this
+  // screen never looked finished on Windows. Its colours are not ours to set
+  // either: the desktop preload builds a hidden probe styled from two theme
+  // tokens, measures it, and forwards the result over its `windowsAppearance` IPC,
+  // re-measuring whenever `document.head` changes. So the caption is repainted by
+  // restyling that probe — and only that probe, because overriding the theme
+  // tokens themselves would repaint the caption at the cost of dragging the whole
+  // shell's sidebar fill and label colour along with it, which shows through the
+  // dissolve. The probe is identified by the tokens it reads, the one thing about
+  // it that is stable.
+  var CAPTION_CSS = 'body>span[style*="dsw-specific-sidebar-fill"]'
+    + '{background-color:rgba(0,0,0,0)!important;color:#e8f2fb!important}'
+  var captionStyle = null
+  // Once the overlay has left, a late call must not repaint a caption that has
+  // already been handed back.
+  var captionDone = false
+
   /**
    * Watch the clip so the dissolve can be aimed at its last frame.
    *
@@ -462,6 +480,11 @@
     setState('leaving')
     globalThis.setTimeout(function () {
       if (parts.root.parentNode) parts.root.parentNode.removeChild(parts.root)
+      // Handed back here rather than when the fade starts: a transparent caption
+      // stays correct for the whole dissolve — it shows whatever is behind it, which
+      // is exactly what is fading — whereas an opaque one would flip to the shell's
+      // colours while the sea is still on screen.
+      restoreCaptionTokens()
     }, span + 100)
 
     if (standalone) {
@@ -580,9 +603,32 @@
     }, 800)
   }
 
+  /**
+   * Repaint the Windows caption in this screen's colours.
+   *
+   * Appending to the head is the whole mechanism twice over: the rule restyles the
+   * preload's probe, and the head mutation is what makes the preload measure again
+   * and push the new colours to the caption.
+   */
+  function applyCaptionTokens() {
+    if (captionDone || captionStyle) return
+    captionStyle = document.createElement('style')
+    captionStyle.setAttribute('data-dshba-caption', '')
+    captionStyle.textContent = CAPTION_CSS
+    document.head.appendChild(captionStyle)
+  }
+
+  /** Hand the caption back. Removing the rule is what makes the preload measure again. */
+  function restoreCaptionTokens() {
+    captionDone = true
+    if (captionStyle && captionStyle.parentNode) captionStyle.parentNode.removeChild(captionStyle)
+    captionStyle = null
+  }
+
   function mount() {
     document.head.appendChild(parts.css)
     ;(document.body || document.documentElement).appendChild(parts.root)
+    applyCaptionTokens()
     observeProgress()
     observeFailure()
     startDiagnostics()
