@@ -14,8 +14,18 @@
 // framework and must survive the UI renderer failing.
 
 /* eslint-disable */
-;(function () {
+; (function () {
   'use strict'
+
+  var ENV = (function () {
+    var ua = navigator.userAgent || ''
+    return {
+      isDesktop: /Electron/i.test(ua),
+      isWeb: !/Electron/i.test(ua),
+      platform: ua.indexOf('Windows') >= 0 ? 'win'
+        : ua.indexOf('Mac') >= 0 ? 'mac' : 'other'
+    }
+  })()
 
   var cfg = globalThis.__DSH_BOOT_ANIM_CFG__
   if (!cfg || typeof cfg !== 'object' || typeof cfg.manifest !== 'string') return
@@ -217,7 +227,8 @@
     // With sound off there is no button at all, because there is nothing it could
     // be allowed to do: a control that only ever fails is worse than no control.
     var sound = null
-    if (SOUND_ON) {
+    // console.log('ENV', ENV);
+    if (ENV.isWeb && SOUND_ON) {  // 只有 网页端 才需要这个手动点击的按钮（其实不用也行，因为支持点击页面就开启声音）
       sound = document.createElement('button')
       sound.className = 'dshba-sound'
       sound.type = 'button'
@@ -584,6 +595,7 @@
     if (!CLICK_TO_ENTER && !finished && namespace.audioBlocked !== null && typeof audioRetry === 'function') {
       audioRetry()
       namespace.audioBlocked = null
+      if (parts.sound) parts.sound.textContent = '🔊 声音已开' // 解决和 toggleSound 按钮文字状态不同同步的问题
       if (!namespace.failed) parts.hint.textContent = HINT_SOUND
       return
     }
@@ -678,7 +690,7 @@
 
   function mount() {
     document.head.appendChild(parts.css)
-    ;(document.body || document.documentElement).appendChild(parts.root)
+      ; (document.body || document.documentElement).appendChild(parts.root)
     applyCaptionTokens()
     observeProgress()
     observeFailure()
@@ -783,7 +795,7 @@
           var fallback = function () {
             namespace.audioBlocked = 'refused'
             audioRetry = function () {
-              attemptPlay(false, function () {/* stays silent */})
+              attemptPlay(false, function () {/* stays silent */ })
             }
             attemptPlay(true, blocked)
           }
