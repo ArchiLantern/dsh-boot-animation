@@ -1,6 +1,6 @@
 {
   "name": "dsh-boot-animation",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "鲸鱼娘启动加载动画：点击进入（Esc/空格放行）、多片随机、启动进度可见、失败有兜底。不改 DSH 本体源码。",
   "license": "MIT",
   "author": "lxj5820",
